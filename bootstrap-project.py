@@ -38,8 +38,8 @@ NPM_DEV_DEPS = [
     "@types/react-dom@^18.0.0",
     "quicktype@^23.0.0",
     "prettier@^3.0.0",
-    "@typescript-eslint/eslint-plugin@^6.0.0",
-    "@typescript-eslint/parser@^6.0.0",
+    "@typescript-eslint/eslint-plugin@^8.0.0",
+    "@typescript-eslint/parser@^8.0.0",
 ]
 
 

@@ -187,19 +187,166 @@ def run_docker_container(work_dir: Path) -> None:
         # Determine the correct host based on the OS
         host = "host.docker.internal" if platform.system() != "Linux" else "172.17.0.1"
 
+        # Mount the current directory to preserve server configuration
+        current_dir = Path.cwd()
+        
         cmd = [
             "docker", "run", "-d", "--name", container_name,
             "-p", f"127.0.0.1:{SERVER_PORT}:{SERVER_PORT}",
+            "-v", f"{current_dir}:/app/config:ro",  # Mount config as read-only
             "--add-host", f"{host}:host-gateway",
+            "--restart", "unless-stopped",  # Auto-restart policy
             DOCKER_IMAGE_NAME
         ]
         run_command(cmd, cwd=work_dir)
-        print_success(f"Server container '{container_name}' started.")
-        print_info(f"Forwarding port: 127.0.0.1:{SERVER_PORT} -> container:{SERVER_PORT}")
+        print_success(f"Server container '{container_name}' started successfully!")
+        print_info(f"🌐 Server URL: ws://localhost:{SERVER_PORT}")
+        print_info(f"🔗 Port forwarding: 127.0.0.1:{SERVER_PORT} -> container:{SERVER_PORT}")
+        print_info(f"📁 Config mounted from: {current_dir}")
+        
+        # Wait a moment for container to start
+        print_step("Waiting for server to initialize...")
+        time.sleep(3)
+        
+        # Check container health
+        check_container_health(container_name, work_dir)
+        
+        # Show connection information
+        show_connection_info()
+        
+        # Offer to show logs
+        show_log_options(container_name)
 
     except (subprocess.CalledProcessError, FileNotFoundError):
         print_error("Failed to start Docker container.")
         raise
+
+def check_container_health(container_name: str, work_dir: Path) -> None:
+    """Check if the container is running and healthy."""
+    try:
+        # Check if container is running
+        result = run_command(["docker", "ps", "-q", "-f", f"name={container_name}"], cwd=work_dir)
+        if not result.stdout.strip():
+            print_error(f"Container '{container_name}' is not running!")
+            # Show recent logs for debugging
+            print_error("Recent container logs:")
+            run_command(["docker", "logs", "--tail", "20", container_name], cwd=work_dir, check=False)
+            return
+            
+        print_success("Container is running")
+        
+        # Check container health if health check is available
+        result = run_command(["docker", "inspect", "--format={{.State.Health.Status}}", container_name], cwd=work_dir, check=False)
+        if result.returncode == 0 and result.stdout.strip():
+            health_status = result.stdout.strip()
+            if health_status == "healthy":
+                print_success("Container health check: HEALTHY ✅")
+            elif health_status == "unhealthy":
+                print_warning("Container health check: UNHEALTHY ⚠️")
+            else:
+                print_info(f"Container health check: {health_status.upper()}")
+        
+        # Test network connectivity
+        print_step("Testing server connectivity...")
+        test_result = run_command(["curl", "-f", "--max-time", "5", f"http://localhost:{SERVER_PORT}/"], cwd=work_dir, check=False)
+        if test_result.returncode == 0:
+            print_success("Server is responding to HTTP requests ✅")
+        else:
+            print_warning("Server not yet responding to HTTP requests (this may be normal)")
+            
+    except Exception as e:
+        print_warning(f"Could not fully check container health: {e}")
+
+def show_connection_info() -> None:
+    """Display connection information and secrets."""
+    print_step("📋 Connection Information")
+    
+    # Read server properties if available
+    server_props_file = Path("server.properties")
+    if server_props_file.exists():
+        try:
+            with open(server_props_file, 'r') as f:
+                properties = {}
+                for line in f:
+                    line = line.strip()
+                    if line and '=' in line and not line.startswith('#'):
+                        key, value = line.split('=', 1)
+                        properties[key.strip()] = value.strip()
+            
+            print_info(f"🌐 Server URL: ws://localhost:{properties.get('local-port', SERVER_PORT)}")
+            
+            if 'bots-secrets' in properties:
+                print_info(f"🤖 Bot Secret: {properties['bots-secrets']}")
+                print_info("   ↳ Use this secret for bot connections")
+                
+            if 'controller-secrets' in properties:
+                print_info(f"🎮 Controller Secret: {properties['controller-secrets']}")
+                print_info("   ↳ Use this secret for UI/observer connections")
+                
+            print_info(f"📁 Config file: {server_props_file.absolute()}")
+            
+        except Exception as e:
+            print_warning(f"Could not read server properties: {e}")
+    else:
+        print_warning("server.properties file not found - secrets may be generated at runtime")
+        print_info(f"🌐 Server URL: ws://localhost:{SERVER_PORT}")
+
+def show_log_options(container_name: str) -> None:
+    """Show available logging options."""
+    print_step("📊 Logging Options")
+    print_info("Available log commands:")
+    print_info(f"  📄 View current logs:     docker logs {container_name}")
+    print_info(f"  📺 Follow logs in real-time: docker logs -f {container_name}")
+    print_info(f"  🔍 Last 50 lines:        docker logs --tail 50 {container_name}")
+    print_info(f"  💾 Save logs to file:     docker logs {container_name} > server.log")
+    print_info("")
+    print_info("Container log files (accessible via docker exec):")
+    print_info("  📋 /app/logs/startup.log  - Container startup logs")
+    print_info("  🎮 /app/logs/server.log   - Tank Royale server logs")
+    print_info("  🖥️  /app/logs/xvfb.log    - Virtual display logs")
+    print_info("  ☕ /app/logs/gc.log       - Java garbage collection logs")
+    print_info("  📊 /app/logs/tank-royale-*.log - Java application logs")
+    print_info("")
+    print_info("Quick log viewing:")
+    print_info(f"  docker exec {container_name} tail -f /app/logs/server.log")
+    
+    # Ask if user wants to monitor logs
+    try:
+        response = input(f"\n{Colors.YELLOW}📺 Would you like to monitor logs in real-time? (y/N): {Colors.RESET}")
+        if response.lower() in ['y', 'yes']:
+            monitor_logs_realtime(container_name, Path.cwd())
+    except KeyboardInterrupt:
+        print_info("\nSkipping log monitoring")
+
+def monitor_logs_realtime(container_name: str, work_dir: Path) -> None:
+    """Monitor container logs in real-time."""
+    print_step("📺 Starting real-time log monitoring...")
+    print_info("Press Ctrl+C to stop monitoring")
+    print_info("=" * 60)
+    
+    try:
+        # Use subprocess.Popen for real-time output
+        process = subprocess.Popen(
+            ["docker", "logs", "-f", "--tail", "20", container_name],
+            cwd=work_dir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+        
+        # Stream output in real-time
+        for line in process.stdout:
+            print(line.rstrip())
+            
+    except KeyboardInterrupt:
+        print_info("\n" + "=" * 60)
+        print_success("Log monitoring stopped")
+        if process:
+            process.terminate()
+    except Exception as e:
+        print_error(f"Error monitoring logs: {e}")
 
 def main():
     """Main execution flow."""
@@ -223,9 +370,18 @@ def main():
         # 4. Run the Docker container
         run_docker_container(work_dir)
 
-        print_success("Tank Royale server is now running!")
-        print_info(f"Server is accessible at: http://localhost:{SERVER_PORT}")
-        print_info("To stop the server, run: docker stop tank-royale-server")
+        print_success("🎉 Tank Royale server is now running!")
+        print_info("")
+        print_step("💡 Server Management Commands")
+        print_info("  🔄 Restart server:       docker restart tank-royale-server")
+        print_info("  ⏹️  Stop server:          docker stop tank-royale-server") 
+        print_info("  🗑️  Remove server:        docker rm tank-royale-server")
+        print_info("  📊 Container stats:       docker stats tank-royale-server")
+        print_info("")
+        print_info("Advanced debugging:")
+        print_info("  🔍 Enter container:       docker exec -it tank-royale-server bash")
+        print_info("  📋 Inspect container:     docker inspect tank-royale-server")
+        print_info("  🌐 Test connectivity:     curl -v http://localhost:7655/")
 
     except Exception as e:
         print_error(f"An error occurred: {e}")
